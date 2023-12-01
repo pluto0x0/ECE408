@@ -12,8 +12,11 @@
         exit(-1); \
     } \
 }
+#define CONSTANT_SIZE 12544
 
-__global__ void conv_forward_kernel(float *output, const float *input, const float *mask, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
+__constant__ float mask[CONSTANT_SIZE];
+
+__global__ void conv_forward_kernel(float *output, const float *input/*, const float *mask*/, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
 {
     /*
     Modify this function to implement the forward pass described in Chapter 16.
@@ -83,15 +86,19 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
     unsigned int W_out = (W - K)/S + 1;
     unsigned int size_in = B * W * H * C * sizeof(float);
     unsigned int size_out = B * H_out * W_out * M * sizeof(float);
-    unsigned int sizse_mask = K * K * M * C * sizeof(float);
+    unsigned int size_mask = K * K * M * C * sizeof(float);
 
     cudaMalloc(device_input_ptr, size_in);
     cudaMalloc(device_output_ptr, size_out);
-    cudaMalloc(device_mask_ptr, sizse_mask);
+    cudaMalloc(device_mask_ptr, size_mask);
 
     cudaMemcpy(*device_input_ptr, host_input, size_in, cudaMemcpyHostToDevice);
     cudaMemcpy(*device_output_ptr, host_output, size_out, cudaMemcpyHostToDevice);
-    cudaMemcpy(*device_mask_ptr, host_mask, sizse_mask, cudaMemcpyHostToDevice);
+// >>>>>>>>>>>> Optimization 1 Constant memory mask 
+    // cudaMemcpy(*device_mask_ptr, host_mask, size_mask, cudaMemcpyHostToDevice);
+    if(size_mask > CONSTANT_SIZE) std::cerr << "mask size exceeded: " << size_mask << std::endl;
+    else cudaMemcpyToSymbol(mask, host_mask, size_mask);
+// <<<<<<<<<<<<
     
     CHECK_ERR;
 }
@@ -108,7 +115,7 @@ __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *
 
     dim3 grid(M, Y);
     dim3 block(TILE_WIDTH, TILE_WIDTH); // output tile for untiled code
-    conv_forward_kernel<<<grid, block>>>(device_output, device_input, device_mask, B, M, C, H, W, K, S);
+    conv_forward_kernel<<<grid, block>>>(device_output, device_input/*, device_mask*/, B, M, C, H, W, K, S);
 
     CHECK_ERR;
 }
