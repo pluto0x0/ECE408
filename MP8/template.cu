@@ -1,5 +1,8 @@
 #include <wb.h>
 
+#define BLOCK_SIZE 1024
+#define MAX_BLOCKS 1024
+
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
     cudaError_t err = stmt;                                               \
@@ -14,13 +17,24 @@ __global__ void spmvJDSKernel(float *out, int *matColStart, int *matCols,
                               int *matRowPerm, int *matRows,
                               float *matData, float *vec, int dim) {
   //@@ insert spmv kernel for jds format
+  int stride = gridDim.x * blockDim.x;
+  int i = threadIdx.x + blockDim.x * blockIdx.x;
+  for( ;i < dim; i += stride) {
+    float res = 0.;
+    for(int j = 0; j < matRows[i]; j++) {
+      int idx_data = matColStart[j] + i;
+      res += matData[idx_data] * vec[matCols[idx_data]];
+    }
+    atomicAdd(out + matRowPerm[i], res);
+  }
 }
 
 static void spmvJDS(float *out, int *matColStart, int *matCols,
                     int *matRowPerm, int *matRows, float *matData,
                     float *vec, int dim) {
-
   //@@ invoke spmv kernel for jds format
+  int num_blocks = min((dim - 1) / BLOCK_SIZE + 1, MAX_BLOCKS);
+  spmvJDSKernel<<<num_blocks, BLOCK_SIZE>>>(out, matColStart, matCols, matRowPerm, matRows, matData, vec, dim);
 }
 
 int main(int argc, char **argv) {

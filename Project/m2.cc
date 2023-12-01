@@ -20,7 +20,6 @@ void inference_only(int batch_size) {
 }
 
 int main(int argc, char* argv[]) {
-
   run_testcase("../ece408/project/testcases", false);
 
   int batch_size = 10000;

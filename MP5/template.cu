@@ -18,9 +18,21 @@
   
 __global__ void total(float *input, float *output, int len) {
   //@@ Load a segment of the input vector into shared memory
+  __shared__ float sum[BLOCK_SIZE * 2];
+  const int tx = threadIdx.x;
+  const int x = blockIdx.x * BLOCK_SIZE * 2 + threadIdx.x;
+  sum[tx] = x < len ? input[x] : 0.;
+  sum[tx + BLOCK_SIZE] = tx + BLOCK_SIZE < len ? input[x + BLOCK_SIZE] : 0.;
+  __syncthreads();
   //@@ Traverse the reduction tree
+  for(int stride = BLOCK_SIZE; stride; stride /= 2) {
+    __syncthreads();
+    if(tx < stride)
+      sum[tx] += sum[tx + stride];
+  }
   //@@ Write the computed sum of the block to the output vector at the
   //@@ correct index
+  output[blockIdx.x] = sum[0];
 }
 
 int main(int argc, char **argv) {
@@ -54,14 +66,18 @@ int main(int argc, char **argv) {
 
   wbTime_start(GPU, "Allocating GPU memory.");
   //@@ Allocate GPU memory here
+  cudaMalloc(&deviceInput, numInputElements * sizeof(float));
+  cudaMalloc(&deviceOutput, numOutputElements * sizeof(float));
 
   wbTime_stop(GPU, "Allocating GPU memory.");
 
   wbTime_start(GPU, "Copying input memory to the GPU.");
   //@@ Copy memory to the GPU here
+  cudaMemcpy(deviceInput, hostInput, numInputElements * sizeof(float), cudaMemcpyHostToDevice);
 
   wbTime_stop(GPU, "Copying input memory to the GPU.");
   //@@ Initialize the grid and block dimensions here
+  total<<<numOutputElements, BLOCK_SIZE>>>(deviceInput, deviceOutput, numInputElements);
 
   wbTime_start(Compute, "Performing CUDA computation");
   //@@ Launch the GPU Kernel here
@@ -71,6 +87,7 @@ int main(int argc, char **argv) {
 
   wbTime_start(Copy, "Copying output memory to the CPU");
   //@@ Copy the GPU memory back to the CPU here
+  cudaMemcpy(hostOutput, deviceOutput, numOutputElements * sizeof(float), cudaMemcpyDeviceToHost);
 
   wbTime_stop(Copy, "Copying output memory to the CPU");
 
@@ -86,6 +103,8 @@ int main(int argc, char **argv) {
 
   wbTime_start(GPU, "Freeing GPU Memory");
   //@@ Free the GPU memory here
+  cudaFree(deviceInput);
+  cudaFree(deviceOutput);
 
   wbTime_stop(GPU, "Freeing GPU Memory");
 

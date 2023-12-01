@@ -6,7 +6,7 @@
 
 #include <wb.h>
 
-#define BLOCK_SIZE 512 //@@ You can change this
+#define BLOCK_SIZE 1024 //@@ You can change this
 
 #define wbCheck(stmt)                                                     \
   do {                                                                    \
@@ -18,11 +18,40 @@
     }                                                                     \
   } while (0)
 
-__global__ void scan(float *input, float *output, int len) {
-  //@@ Modify the body of this function to complete the functionality of
-  //@@ the scan on the device
-  //@@ You may need multiple kernel calls; write your kernels before this
-  //@@ function and call them from the host
+__global__ void scan(float *input, float *output, int len, float *blockSum) {
+  // Brent-Kung
+  __shared__ float arr[BLOCK_SIZE * 2];
+  const int tx = threadIdx.x, bx = blockDim.x * blockIdx.x * 2;
+  arr[tx * 2] = bx + tx * 2 < len ? input[bx + tx * 2] : 0.;
+  arr[tx * 2 + 1] = bx + tx * 2 + 1 < len ? input[bx + tx * 2 + 1] : 0.;
+  __syncthreads();
+  int stride;
+
+  for(stride = 1; stride <= BLOCK_SIZE; stride <<= 1) {
+    __syncthreads();
+    if(!((tx + 1) & (stride - 1))) {
+      arr[tx * 2 + 1] += arr[tx * 2 + 1 - stride];
+    }
+  }
+  for(stride >>= 1; stride; stride >>= 1) {
+    __syncthreads();
+    if(tx < BLOCK_SIZE - 1 && !((tx + 1) & (stride - 1))) {
+      arr[tx * 2 + 1 + stride] += arr[tx * 2 + 1];
+    }
+  }
+  __syncthreads();
+  if(bx + tx * 2 < len) output[bx + tx * 2] = arr[tx * 2];
+  if(bx + tx * 2 + 1 < len) output[bx + tx * 2 + 1] = arr[tx * 2 + 1];
+  if(blockSum != nullptr && tx == BLOCK_SIZE - 1) blockSum[blockIdx.x] = arr[tx * 2 + 1];
+}
+
+
+__global__ void add(float *input, float *output, int len) {
+  // Brent-Kung
+  const int tx = threadIdx.x, bx = blockDim.x * blockIdx.x * 2;
+  float sum = blockIdx.x ? input[blockIdx.x - 1] : 0.;
+  output[bx + tx * 2] += sum;
+  output[bx + tx * 2 + 1] += sum;
 }
 
 int main(int argc, char **argv) {
@@ -58,11 +87,18 @@ int main(int argc, char **argv) {
   wbTime_stop(GPU, "Copying input memory to the GPU.");
 
   //@@ Initialize the grid and block dimensions here
+  int gridDim = ceil(double(numElements) / (BLOCK_SIZE * 2));
+  float *deviceBlockSum;
+  cudaMalloc(&deviceBlockSum, gridDim * sizeof(float));
 
   wbTime_start(Compute, "Performing CUDA computation");
   //@@ Modify this to complete the functionality of the scan
   //@@ on the deivce
 
+  scan<<<gridDim, BLOCK_SIZE>>>(deviceInput, deviceOutput, numElements, deviceBlockSum);
+  scan<<<1, BLOCK_SIZE>>>(deviceBlockSum, deviceBlockSum, gridDim, nullptr);  // only when gridDim <= BLOCKSIZE * 2
+  add<<<gridDim, BLOCK_SIZE>>>(deviceBlockSum, deviceOutput, numElements);
+  
   cudaDeviceSynchronize();
   wbTime_stop(Compute, "Performing CUDA computation");
 
