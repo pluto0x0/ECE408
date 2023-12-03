@@ -46,6 +46,7 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     #define mask_4d(i3, i2, i1, i0) mask[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
     // Insert your GPU convolution kernel code here
+    const unsigned int b = blockIdx.z;
     unsigned int W_blksize = (W_out - 1) / TILE_WIDTH + 1; // number of horizontal tiles per output map
     unsigned int m = blockIdx.x; // output channel
     unsigned int h_s = (blockIdx.y / W_blksize) * TILE_WIDTH + threadIdx.y;
@@ -55,14 +56,13 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 
     if (w + K - 1 >= W || h + K - 1 >= H) return;
 
-    for (int b = 0 ; b < B; b++) {  // loop over a batch
-        float acc = 0.;
-        for (int c = 0; c < C; c++) // sum over all input channels
-            for (int p = 0; p < K; p++) // loop over KxK filter
-                for (int q = 0; q < K; q++)
-                    acc += in_4d(b, c, h + p, w + q) * mask_4d(m, c, p, q);
-        out_4d(b, m, h_s, w_s) = acc;
+    float acc = 0.;
+    for (int c = 0; c < C; c++) {// sum over all input channels
+        for (int p = 0; p < K; p++) // loop over KxK filter
+            for (int q = 0; q < K; q++)
+                acc += in_2d(h + p, w + q) * mask_2d(p, q);
     }
+    out_4d(b, m, h_s, w_s) = acc;
 
     #undef out_4d
     #undef in_4d
@@ -72,13 +72,6 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 	
 __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, const float *host_input, const float *host_mask, float **device_output_ptr, float **device_input_ptr, float **device_mask_ptr, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
-    // Allocate memory and copy over the relevant data structures to the GPU
-
-    // We pass double pointers for you to initialize the relevant device pointers,
-    //  which are passed to the other two functions.
-
-    // Useful snippet for error checking
-
     unsigned int H_out = (H - K)/S + 1;
     unsigned int W_out = (W - K)/S + 1;
     unsigned int size_in = B * W * H * C * sizeof(float);
@@ -99,14 +92,12 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
 
 __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
-    // Set the kernel dimensions and call the kernel
     unsigned int H_out = (H - K)/S + 1;
     unsigned int W_out = (W - K)/S + 1;
     unsigned int W_blksize = (W_out - 1) / TILE_WIDTH + 1; // number of horizontal tiles per output map
     unsigned int H_blksize = (H_out - 1) / TILE_WIDTH + 1; // number of vertical tiles per output map
     unsigned int Y = H_blksize * W_blksize; // total number of tiles per map
-
-    dim3 grid(M, Y);
+    dim3 grid(M, Y, B);
     dim3 block(TILE_WIDTH, TILE_WIDTH); // output tile for untiled code
     conv_forward_kernel<<<grid, block>>>(device_output, device_input, device_mask, B, M, C, H, W, K, S);
 
