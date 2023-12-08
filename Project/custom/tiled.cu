@@ -53,23 +53,24 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
 
     float acc = 0.;
 
-    for (int c = 0; c < C; c++) {
-        int copy_x = (w + S + K - 1 >= W || tx == BLOCK_SIZE - 1) ? K : S;
-        int copy_y = (h + S + K - 1 >= H || ty == BLOCK_SIZE - 1) ? K : S;
-        if (w + K - 1 < W && h + K - 1 < H)
-            for(int y = 0; y < copy_y; y++)
-                for(int x = 0; x < copy_x; x++)
+        for (int c = 0; c < C; c++) {
+            int margin = min(S, K);
+            for(int y = 0; y < margin && ty * S + y < tw; y++)
+                for(int x = 0; x < margin && tx * S + x < tw; x++)
                     tile(c, ty * S + y, tx * S + x) = in_4d(b, c, h + y, w + x);
-    }
+        }
     __syncthreads();
+    if(tx < BLOCK_SIZE && ty < BLOCK_SIZE)
     for (int c = 0; c < C; c++) {
         // if(w + K - 1 < W && h + K - 1 < H)
-            for (int y = 0; y < K; y++)
-                for (int x = 0; x < K; x++)
-                    acc += tile(c, ty * S + y, tx * S + x) * mask_4d(m, c, y, x);
+        for (int y = 0; y < K; y++)
+            for (int x = 0; x < K; x++)
+                acc += tile(c, ty * S + y, tx * S + x) * mask_4d(m, c, y, x);
     }
-    if (w + K - 1 < W && h + K - 1 < H)
-        out_4d(b, m, h_s, w_s) = acc;
+    // if (w + K - 1 < W && h + K - 1 < H)
+    if(tx < BLOCK_SIZE && ty < BLOCK_SIZE)
+        if(h_s < H_out && w_s < W_out)
+            out_4d(b, m, h_s, w_s) = acc;
 
     #undef tile
     #undef out_4d
@@ -108,7 +109,8 @@ __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *
     unsigned int Y = H_blksize * W_blksize; // total number of tiles per map
 
     dim3 grid(B, M, Y);
-    dim3 block(BLOCK_SIZE, BLOCK_SIZE); // output tile for untiled code
+    int margin = K > S ? (K - S - 1) / S + 1 : 0;
+    dim3 block(BLOCK_SIZE + margin, BLOCK_SIZE + margin); // output tile for untiled code
     unsigned int shared_size = C * TILE_WIDTH * TILE_WIDTH *  sizeof(float);
     conv_forward_kernel<<<grid, block, shared_size>>>(device_output, device_input, device_mask, B, M, C, H, W, K, S);
 
