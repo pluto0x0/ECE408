@@ -1,4 +1,4 @@
-// http://s3.amazonaws.com/files.rai-project.com/userdata/build-6545ac89d42bea0a4d9556ae.tar.gz
+#ifdef MATRIX_CU
 
 #include <cmath>
 #include <iostream>
@@ -125,6 +125,7 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
 
 __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
+    std::cerr << "Running in " << __FILE__ << std::endl;
     float *device_mat;
     cudaMalloc(&device_mat, B * MAT_TOT * sizeof(float));
 
@@ -210,3 +211,5 @@ __host__ void GPUInterface::get_device_properties()
         std::cout<<"Warp Size: "<<deviceProp.warpSize<<std::endl;
     }
 }
+
+#endif

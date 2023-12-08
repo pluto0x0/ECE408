@@ -1,5 +1,6 @@
 #include "cpu-new-forward.h"
 
+
 void conv_forward_cpu(float *output, const float *input, const float *mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
   /*

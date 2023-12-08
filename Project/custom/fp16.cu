@@ -1,8 +1,11 @@
-#ifdef TILED_CU
+#ifdef FP16_CU
 
 #include <cmath>
 #include <iostream>
 #include "gpu-new-forward.h"
+#include <cuda_fp16.h>
+
+#define TILE_WIDTH 17
 
 #define CHECK_ERR { \
     cudaError_t error = cudaGetLastError(); \
@@ -12,10 +15,7 @@
     } \
 }
 
-#define BLOCK_SIZE 16
-#define TILE_WIDTH ((BLOCK_SIZE - 1) * S + K)
-
-__global__ void conv_forward_kernel(float *output, const float *input, const float  *mask, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
+__global__ void conv_forward_kernel(float* __restrict__ output, const __half * __restrict__ input, const __half *__restrict__ mask, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
 {
     /*
     mask - convolution kernel
@@ -34,64 +34,61 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     #define out_4d(i3, i2, i1, i0) output[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
     #define in_4d(i3, i2, i1, i0) input[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
     #define mask_4d(i3, i2, i1, i0) mask[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
-    #define tile(i2, i1, i0) tile_input[(i2) * tw * tw + tw * (i1) + (i0)]
     
-    extern __shared__ float tile_input[];
+    #define in_2d(i1, i0) Input[(i1) * (W) + i0]
+    #define mask_2d(i1, i0) Mask[(i1) * (K) + i0]
 
     const unsigned int b = blockIdx.x;
-    unsigned int tx = threadIdx.x;
-    unsigned int ty = threadIdx.y;
-    unsigned int W_blksize = (W_out - 1) / BLOCK_SIZE + 1; // number of horizontal tiles per output map
+    unsigned int W_blksize = (W_out - 1) / TILE_WIDTH + 1; // number of horizontal tiles per output map
     unsigned int m = blockIdx.y; // output channel
-    unsigned int h_s = (blockIdx.z / W_blksize) * BLOCK_SIZE + threadIdx.y;
+    unsigned int h_s = (blockIdx.z / W_blksize) * TILE_WIDTH + threadIdx.y;
     unsigned int h = h_s * S;
-    unsigned int w_s = (blockIdx.z % W_blksize) * BLOCK_SIZE + threadIdx.x;
+    unsigned int w_s = (blockIdx.z % W_blksize) * TILE_WIDTH + threadIdx.x;
     unsigned int w = w_s * S;
-    const unsigned int tw = TILE_WIDTH;
 
     // if (w + K - 1 >= W || h + K - 1 >= H) return;
 
     float acc = 0.;
 
-    for (int c = 0; c < C; c++) {
-        int copy_x = (w + S + K - 1 >= W || tx == BLOCK_SIZE - 1) ? K : S;
-        int copy_y = (h + S + K - 1 >= H || ty == BLOCK_SIZE - 1) ? K : S;
-        if (w + K - 1 < W && h + K - 1 < H)
-            for(int y = 0; y < copy_y; y++)
-                for(int x = 0; x < copy_x; x++)
-                    tile(c, ty * S + y, tx * S + x) = in_4d(b, c, h + y, w + x);
-    }
-    __syncthreads();
-    for (int c = 0; c < C; c++) {
-        // if(w + K - 1 < W && h + K - 1 < H)
-            for (int y = 0; y < K; y++)
-                for (int x = 0; x < K; x++)
-                    acc += tile(c, ty * S + y, tx * S + x) * mask_4d(m, c, y, x);
+    for (int c = 0; c < C; c++) { // sum over all input channels
+        // const float *Input = input + (b) * (C * H * W) + (c) * (H * W);
+        // const float *Mask = mask + (m) * (C * K * K) + (c) * (K * K);
+        for (int p = 0; p < K; p++) {// loop over KxK filter
+            for (int q = 0; q < K; q++)
+                // acc += in_2d(h + p, w + q) * mask_2d(p, q);
+                acc += float(in_4d(b, c, h + p, w + q) * mask_4d(m, c, p, q));
+        }
     }
     if (w + K - 1 < W && h + K - 1 < H)
         out_4d(b, m, h_s, w_s) = acc;
 
-    #undef tile
     #undef out_4d
     #undef in_4d
     #undef mask_4d
 }
 
-	
+__global__ void into_half(const float *input, __half *output) {
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+    output[id] = __float2half(input[id]);
+}
+
 __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, const float *host_input, const float *host_mask, float **device_output_ptr, float **device_input_ptr, float **device_mask_ptr, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     unsigned int H_out = (H - K)/S + 1;
     unsigned int W_out = (W - K)/S + 1;
     unsigned int size_in = B * W * H * C * sizeof(float);
     unsigned int size_out = B * H_out * W_out * M * sizeof(float);
-    unsigned int sizse_mask = K * K * M * C * sizeof(float); 
+    unsigned int sizse_mask = K * K * M * C * sizeof(float);
 
     cudaMalloc(device_input_ptr, size_in);
     cudaMalloc(device_output_ptr, size_out);
     cudaMalloc(device_mask_ptr, sizse_mask);
 
     cudaMemcpy(*device_input_ptr, host_input, size_in, cudaMemcpyHostToDevice);
+    cudaMemcpy(*device_output_ptr, host_output, size_out, cudaMemcpyHostToDevice);
     cudaMemcpy(*device_mask_ptr, host_mask, sizse_mask, cudaMemcpyHostToDevice);
+
+
     
     CHECK_ERR;
 }
@@ -100,17 +97,28 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
 __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
     std::cerr << "Running in " << __FILE__ << std::endl;
+    // get_device_properties();
 
     unsigned int H_out = (H - K)/S + 1;
     unsigned int W_out = (W - K)/S + 1;
-    unsigned int W_blksize = (W_out - 1) / BLOCK_SIZE + 1; // number of horizontal tiles per output map
-    unsigned int H_blksize = (H_out - 1) / BLOCK_SIZE + 1; // number of vertical tiles per output map
+    unsigned int W_blksize = (W_out - 1) / TILE_WIDTH + 1; // number of horizontal tiles per output map
+    unsigned int H_blksize = (H_out - 1) / TILE_WIDTH + 1; // number of vertical tiles per output map
     unsigned int Y = H_blksize * W_blksize; // total number of tiles per map
 
+    
+    unsigned int size_in = B * W * H * C * sizeof(__half);
+    unsigned int sizse_mask = K * K * M * C * sizeof(__half);
+
+    __half *hinput, *hmask;
+    
+    cudaMalloc(&hinput, size_in);
+    cudaMalloc(&hmask, sizse_mask);
+    into_half<<<B * W, H * C>>>(device_input, hinput);
+    into_half<<<K * K, M * C>>>(device_mask, hmask);
+
     dim3 grid(B, M, Y);
-    dim3 block(BLOCK_SIZE, BLOCK_SIZE); // output tile for untiled code
-    unsigned int shared_size = C * TILE_WIDTH * TILE_WIDTH *  sizeof(float);
-    conv_forward_kernel<<<grid, block, shared_size>>>(device_output, device_input, device_mask, B, M, C, H, W, K, S);
+    dim3 block(TILE_WIDTH, TILE_WIDTH); // output tile for untiled code
+    conv_forward_kernel<<<grid, block>>>(device_output, hinput, hmask, B, M, C, H, W, K, S);
 
     CHECK_ERR;
 }

@@ -1,10 +1,11 @@
-// http://s3.amazonaws.com/files.rai-project.com/userdata/build-6545ac89d42bea0a4d9556ae.tar.gz
+#ifdef BASELINE_CU
 
 #include <cmath>
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 16
+#define TILE_WIDTH 17
+
 #define CHECK_ERR { \
     cudaError_t error = cudaGetLastError(); \
     if(error != cudaSuccess) { \
@@ -13,16 +14,9 @@
     } \
 }
 
-__global__ void conv_forward_kernel(float *output, const float *input, const float *mask, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
+__global__ void conv_forward_kernel(float* __restrict__ output, const float * __restrict__ input, const float *__restrict__ mask, const int B, const int M, const int C, const int H, const int W, const int K,const int S)
 {
     /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
-
-    Function paramter definitions:
-    output - output
-    input - input
     mask - convolution kernel
     B - batch_size (number of images in x)
     M - number of output feature maps
@@ -36,33 +30,36 @@ __global__ void conv_forward_kernel(float *output, const float *input, const flo
     const int H_out = (H - K)/S + 1;
     const int W_out = (W - K)/S + 1;
 
-    // We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    // An example use of these macros:
-    // float a = in_4d(0,0,0,0)
-    // out_4d(0,0,0,0) = a
-
     #define out_4d(i3, i2, i1, i0) output[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
     #define in_4d(i3, i2, i1, i0) input[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
     #define mask_4d(i3, i2, i1, i0) mask[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    
+    #define in_2d(i1, i0) Input[(i1) * (W) + i0]
+    #define mask_2d(i1, i0) Mask[(i1) * (K) + i0]
 
-    // Insert your GPU convolution kernel code here
-    const unsigned int b = blockIdx.z;
+    const unsigned int b = blockIdx.x;
     unsigned int W_blksize = (W_out - 1) / TILE_WIDTH + 1; // number of horizontal tiles per output map
-    unsigned int m = blockIdx.x; // output channel
-    unsigned int h_s = (blockIdx.y / W_blksize) * TILE_WIDTH + threadIdx.y;
+    unsigned int m = blockIdx.y; // output channel
+    unsigned int h_s = (blockIdx.z / W_blksize) * TILE_WIDTH + threadIdx.y;
     unsigned int h = h_s * S;
-    unsigned int w_s = (blockIdx.y % W_blksize) * TILE_WIDTH + threadIdx.x;
+    unsigned int w_s = (blockIdx.z % W_blksize) * TILE_WIDTH + threadIdx.x;
     unsigned int w = w_s * S;
 
-    if (w + K - 1 >= W || h + K - 1 >= H) return;
+    // if (w + K - 1 >= W || h + K - 1 >= H) return;
 
     float acc = 0.;
-    for (int c = 0; c < C; c++) {// sum over all input channels
-        for (int p = 0; p < K; p++) // loop over KxK filter
+
+    for (int c = 0; c < C; c++) { // sum over all input channels
+        // const float *Input = input + (b) * (C * H * W) + (c) * (H * W);
+        // const float *Mask = mask + (m) * (C * K * K) + (c) * (K * K);
+        for (int p = 0; p < K; p++) {// loop over KxK filter
             for (int q = 0; q < K; q++)
-                acc += in_2d(h + p, w + q) * mask_2d(p, q);
+                // acc += in_2d(h + p, w + q) * mask_2d(p, q);
+                acc += in_4d(b, c, h + p, w + q) * mask_4d(m, c, p, q);
+        }
     }
-    out_4d(b, m, h_s, w_s) = acc;
+    if (w + K - 1 < W && h + K - 1 < H)
+        out_4d(b, m, h_s, w_s) = acc;
 
     #undef out_4d
     #undef in_4d
@@ -92,12 +89,16 @@ __host__ void GPUInterface::conv_forward_gpu_prolog(const float *host_output, co
 
 __host__ void GPUInterface::conv_forward_gpu(float *device_output, const float *device_input, const float *device_mask, const int B, const int M, const int C, const int H, const int W, const int K, const int S)
 {
+    std::cerr << "Running in " << __FILE__ << std::endl;
+    std::cerr << "S= " << S << std::endl;
+
     unsigned int H_out = (H - K)/S + 1;
     unsigned int W_out = (W - K)/S + 1;
     unsigned int W_blksize = (W_out - 1) / TILE_WIDTH + 1; // number of horizontal tiles per output map
     unsigned int H_blksize = (H_out - 1) / TILE_WIDTH + 1; // number of vertical tiles per output map
     unsigned int Y = H_blksize * W_blksize; // total number of tiles per map
-    dim3 grid(M, Y, B);
+
+    dim3 grid(B, M, Y);
     dim3 block(TILE_WIDTH, TILE_WIDTH); // output tile for untiled code
     conv_forward_kernel<<<grid, block>>>(device_output, device_input, device_mask, B, M, C, H, W, K, S);
 
@@ -143,3 +144,5 @@ __host__ void GPUInterface::get_device_properties()
         std::cout<<"Warp Size: "<<deviceProp.warpSize<<std::endl;
     }
 }
+
+#endif
