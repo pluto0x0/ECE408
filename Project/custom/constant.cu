@@ -4,7 +4,7 @@
 #include <iostream>
 #include "gpu-new-forward.h"
 
-#define TILE_WIDTH 17
+#define TILE_WIDTH 18
 
 #define CHECK_ERR { \
     cudaError_t error = cudaGetLastError(); \
